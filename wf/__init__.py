@@ -2,11 +2,10 @@
 Trimming tasks for illumina paired-end and single ended data.
 """
 
-from asyncore import read
+
 import subprocess
 from pathlib import Path
 from enum import Enum
-from threading import local
 from latch import small_task, workflow
 from latch.types import LatchFile, LatchDir
 from typing import Optional, Tuple
