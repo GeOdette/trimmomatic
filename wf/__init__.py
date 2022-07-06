@@ -3,13 +3,51 @@ Trimming tasks for illumina paired-end and single ended data.
 """
 
 
+from latch.types.glob import file_glob
+import glob
 import subprocess
 from pathlib import Path
 from enum import Enum
 from latch import small_task, workflow
 from latch.types import LatchFile, LatchDir
-from typing import Optional, Tuple
+import typing
+from typing import Optional, Tuple, List
 import os
+from dataclasses import dataclass
+from dataclasses_json import dataclass_json, LetterCase
+from flytekit import Resources, map_task
+
+
+@dataclass_json(letter_case=LetterCase.CAMEL)
+@dataclass
+class SingleEndReads:
+    r1: LatchFile
+
+
+@dataclass_json(letter_case=LetterCase.CAMEL)
+@dataclass
+class PairedEndReads:
+    r1: LatchFile
+    r2: LatchFile
+
+
+@dataclass_json(letter_case=LetterCase.CAMEL)
+@dataclass
+class ReverseEndReadsR1:
+    trimmed_r1: str
+    untrimmed_r1: str
+
+
+@dataclass_json(letter_case=LetterCase.CAMEL)
+@dataclass
+class ReverseEndReadsR2:
+    trimmed_r2: str
+    untrimmed_r2: str
+
+
+class ReadType(Enum):
+    Single_end_reads = "SE"
+    paired_end_reads = "PE"
 
 
 class phred(Enum):
@@ -18,40 +56,50 @@ class phred(Enum):
 
 
 @small_task
-def trimmomatic_task(read1: LatchFile, read2: LatchFile, out_dir: LatchDir, adapter_seq: LatchFile, Slid_wnd: str = "4:30:10", min_len: str = "30", threads: Optional[str] = "4",  PE_status: bool = False, phred: phred = phred.phred64) -> LatchDir:
+# The aim here is to create file pairs from a list of files in a directory ending with either _r1 or _r2, for any case, _r1 is supposed to pair to the next _r2
+def LatchFilePairs(input_dir: LatchDir) -> typing.List[PairedEndReads, ReverseEndReadsR1, ReverseEndReadsR2]:
+    for file in input_dir.local_path:
+        r1 = glob.glob("*_r1")
+        r2 = glob.glob("*_r2")
+        trimmed_r1 = [read1.replace("_r1", "trimmed_r1") for read1 in r1]
+        untrimmed_r1 = [read1.replace("_r1", "utrimmed_r1") for read1 in r1]
+        trimmed_r2 = [read2.replace("_r2", "trimmed_r2") for read2 in r2]
+        untrimmed_r2 = [read2.replace("_r2", "utrimmed_r1") for read2 in r2]
 
-    # defining outputs
+        PairedForwadReads = []  # This should creat a list to contain the forwad read file pairs
+        PairedReverseReads1 = []
+        PairedReverseReads2 = []
+        paired_forwad_files = [r1.local_path, r2.local_path]
+        paired_reverse_read1 = [trimmed_r1, untrimmed_r1]
+        paired_reverse_read2 = [trimmed_r2, untrimmed_r2]
+        PairedForwadReads.append(paired_forwad_files)
+        PairedReverseReads1.append(paired_reverse_read1)
+        PairedReverseReads2.append(paired_reverse_read2)
+        return PairedForwadReads, PairedReverseReads1, PairedReverseReads2
 
-    local_dir = "/root/latch_trim/"
+
+@small_task
+def trimmomatic_task(PairedForwadReads: PairedEndReads, PairedReverseReads1: ReverseEndReadsR1, PairedReverseReads2: ReverseEndReadsR2, out_dir: LatchDir, adapter_seq: LatchFile, Slid_wnd: str = "4:30:10", min_len: str = "30", threads: Optional[str] = "4", read_type: ReadType = ReadType.paired_end_reads, phred: phred = phred.phred64) -> Tuple[LatchFilePairs, LatchDir]:
+
     # local_prefix = os.path.join(local_dir, "latch")
-
-    # Defining output files
-    # orphaned output for reads
-    orphaned_r1 = os.path.join(local_dir, "untrimmed_", read1)
-    orphaned_r2 = os.path.join(local_dir, "untrimmed_", read2)
-
-    # surviving pairs
-    r1_surviving = os.path.join(local_dir, "trimmed_", read1)
-    r2_surviving = os.path.join(local_dir, "trimmed_", read2)
-
+    forwad = [file for files in PairedForwadReads]
+    reverse1 = [R1 for R in PairedReverseReads1]
+    reverse2 = [R2 for R in PairedReverseReads2]
     # Define the trimmomatic function
-    if PE_status == True:
+    if read_type.value == "PE":
         _trimmomatic_cmd = [
             "java",
             "-jar",
             "trimmomatic-0.39.jar",
-            "PE",
+            read_type.value,
             "-threads",
             str(threads),
             phred.value,
             "-basein",
-            read1.local_path,
-            read2.local_path,
+            *forwad,
             "-baseout",
-            str(r1_surviving),
-            str(orphaned_r1),
-            str(r2_surviving),
-            str(orphaned_r2),
+            *reverse1,
+            * reverse2,
             "ILLUMINACLIP:",
             adapter_seq.local_path,
             "SLIDINGWINDOW:",
@@ -63,7 +111,7 @@ def trimmomatic_task(read1: LatchFile, read2: LatchFile, out_dir: LatchDir, adap
 
 
 @ workflow
-def trimmomatic(read1: LatchFile, read2: LatchFile, out_dir: LatchDir, adapter_seq: LatchFile, Slid_wnd: str = "4:30:10", min_len: str = "30", threads: Optional[str] = "4",  PE_status: bool = False, phred: phred = phred.phred64) -> LatchDir:
+def trimmomatic(input_dir: LatchDir, out_dir: LatchDir, adapter_seq: LatchFile, Slid_wnd: str = "4:30:10", min_len: str = "30", threads: Optional[str] = "4", read_type: ReadType = ReadType.paired_end_reads, phred: phred = phred.phred64) -> LatchDir:
     """Trimming tasks for illumina paired-end and single ended data.
 
     Trimmomatic
@@ -139,4 +187,6 @@ def trimmomatic(read1: LatchFile, read2: LatchFile, out_dir: LatchDir, adapter_s
           __metadata__:
             display_name: Output directory
     """
-    return trimmomatic_task(read1=read1, read2=read2, out_dir=out_dir, adapter_seq=adapter_seq, Slid_wnd=Slid_wnd, min_len=min_len, threads=threads, PE_status=PE_status, phred=phred)
+    pairs = LatchFilePairs(input_dir=input_dir)
+    trimming = trimmomatic_task(out_dir=out_dir, adapter_seq=adapter_seq,
+                                Slid_wnd=Slid_wnd, min_len=min_len, threads=threads, read_type=read_type, phred=phred)
