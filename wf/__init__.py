@@ -45,6 +45,14 @@ class ReverseEndReadsR2:
     untrimmed_r2: str
 
 
+@dataclass_json(letter_case=LetterCase.CAMEL)
+@dataclass
+class EndReadsMapTuple:
+    paired_end_reads: PairedEndReads
+    reverse_end_reads_r1: ReverseEndReadsR1
+    reverse_end_reads_r2: ReverseEndReadsR2
+
+        
 class ReadType(Enum):
     Single_end_reads = "SE"
     paired_end_reads = "PE"
@@ -57,7 +65,8 @@ class phred(Enum):
 
 @small_task
 # The aim here is to create file pairs from a list of files in a directory ending with either _r1 or _r2, for any case, _r1 is supposed to pair to the next _r2
-def LatchFilePairs(input_dir: LatchDir) -> typing.List[PairedEndReads, ReverseEndReadsR1, ReverseEndReadsR2]:
+def LatchFilePairs(input_dir: LatchDir) -> typing.List[EndReadsMapTuple]:
+    pairs = []  # This should create a list to contain the forwad read file pairs
     for file in input_dir.local_path:
         r1 = glob.glob("*_r1")
         r2 = glob.glob("*_r2")
@@ -66,25 +75,21 @@ def LatchFilePairs(input_dir: LatchDir) -> typing.List[PairedEndReads, ReverseEn
         trimmed_r2 = [read2.replace("_r2", "trimmed_r2") for read2 in r2]
         untrimmed_r2 = [read2.replace("_r2", "utrimmed_r1") for read2 in r2]
 
-        PairedForwadReads = []  # This should creat a list to contain the forwad read file pairs
-        PairedReverseReads1 = []
-        PairedReverseReads2 = []
-        paired_forwad_files = [r1.local_path, r2.local_path]
-        paired_reverse_read1 = [trimmed_r1, untrimmed_r1]
-        paired_reverse_read2 = [trimmed_r2, untrimmed_r2]
-        PairedForwadReads.append(paired_forwad_files)
-        PairedReverseReads1.append(paired_reverse_read1)
-        PairedReverseReads2.append(paired_reverse_read2)
-        return PairedForwadReads, PairedReverseReads1, PairedReverseReads2
+        paired_forwad_files = PairedEndReads(r1.local_path, r2.local_path)
+        paired_reverse_read1 = ReverseEndReadsR1(trimmed_r1, untrimmed_r1)
+        paired_reverse_read2 = ReverseEndReadsR2(trimmed_r2, untrimmed_r2)
+        pairs.append(EndReadsMapTuple(paired_forwad_files, paired_reverse_read1, paired_reverse_read2))
+        
+    return pairs
 
 
 @small_task
-def trimmomatic_task(PairedForwadReads: PairedEndReads, PairedReverseReads1: ReverseEndReadsR1, PairedReverseReads2: ReverseEndReadsR2, out_dir: LatchDir, adapter_seq: LatchFile, Slid_wnd: str = "4:30:10", min_len: str = "30", threads: Optional[str] = "4", read_type: ReadType = ReadType.paired_end_reads, phred: phred = phred.phred64) -> Tuple[LatchFilePairs, LatchDir]:
+def trimmomatic_task(end_read_tuple: EndReadsMapTuple, out_dir: LatchDir, adapter_seq: LatchFile, Slid_wnd: str = "4:30:10", min_len: str = "30", threads: Optional[str] = "4", read_type: ReadType = ReadType.paired_end_reads, phred: phred = phred.phred64) -> Tuple[LatchFilePairs, LatchDir]:
 
     # local_prefix = os.path.join(local_dir, "latch")
-    forwad = [file for files in PairedForwadReads]
-    reverse1 = [R1 for R in PairedReverseReads1]
-    reverse2 = [R2 for R in PairedReverseReads2]
+    forwad = end_read_tuple.paired_end_reads
+    reverse1 = end_read_tuple.reverse_end_reads_r1
+    reverse2 = end_read_tuple.reverse_end_reads_r2
     # Define the trimmomatic function
     if read_type.value == "PE":
         _trimmomatic_cmd = [
@@ -96,7 +101,9 @@ def trimmomatic_task(PairedForwadReads: PairedEndReads, PairedReverseReads1: Rev
             str(threads),
             phred.value,
             "-basein",
-            *forwad,
+            *forwad, # /dir/file_r1 /dir/file_r2
+#             forwad.r1,
+#             forwad.r2,
             "-baseout",
             *reverse1,
             * reverse2,
@@ -108,6 +115,16 @@ def trimmomatic_task(PairedForwadReads: PairedEndReads, PairedReverseReads1: Rev
             str(min_len), ]
         subprocess.run(_trimmomatic_cmd, check=True)
         return LatchDir(str(local_dir), out_dir.remote_path)
+
+    
+@dynamic
+def my_own_loop(end_read_tuples: typing.List[EndReadsMapTuple], out_dir: LatchDir, adapter_seq: LatchFile, Slid_wnd: str = "4:30:10", min_len: str = "30", threads: Optional[str] = "4", read_type: ReadType = ReadType.paired_end_reads, phred: phred = phred.phred64) -> typing.List[Tuple[LatchFilePairs, LatchDir]]:
+    res = []
+    for end_read_tuple in end_read_tuples:
+        o = trimmomatic_task(end_read_tuple=end_read_tuple, out_dir=out_dir, adapter_seq=adapter_seq,
+                                Slid_wnd=Slid_wnd, min_len=min_len, threads=threads, read_type=read_type, phred=phred)
+        res.append(o)
+    return res
 
 
 @ workflow
@@ -188,5 +205,8 @@ def trimmomatic(input_dir: LatchDir, out_dir: LatchDir, adapter_seq: LatchFile, 
             display_name: Output directory
     """
     pairs = LatchFilePairs(input_dir=input_dir)
-    trimming = trimmomatic_task(out_dir=out_dir, adapter_seq=adapter_seq,
+    # map_task(partial(trimmomatic_task, out_dir=out_dir, adapter_seq=adapter_seq,
+    #                            Slid_wnd=Slid_wnd, min_len=min_len, threads=threads, read_type=read_type, phred=phred))(end_read_tuple=pairs)
+    
+    trimming = my_own_loop(end_read_tuples=pairs, out_dir=out_dir, adapter_seq=adapter_seq,
                                 Slid_wnd=Slid_wnd, min_len=min_len, threads=threads, read_type=read_type, phred=phred)
